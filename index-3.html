@@ -1,0 +1,952 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>When & Where</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body, #root { margin: 0; height: 100%; overflow: hidden; background: #0f172a; }
+    .card-hover:hover { border-color: #6366f1 !important; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       FIREBASE SETUP — fill in your project config below
+       ═══════════════════════════════════════════════════════════════════════
+       1. Go to https://console.firebase.google.com
+       2. Click "Add project" → name it "when-and-where" → Continue
+       3. Click "</> Web" to add a web app → register it
+       4. Copy the firebaseConfig object values into the placeholders below
+       5. In the Firebase console, go to Firestore Database → Create database
+          → Start in "test mode" (you can add security rules later)
+       ═══════════════════════════════════════════════════════════════════════ -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import {
+      getFirestore, doc, getDoc, setDoc, collection, getDocs
+    } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+    // ── PASTE YOUR FIREBASE CONFIG HERE ──────────────────────────────────────
+    const firebaseConfig = {
+      apiKey:            "PASTE_YOUR_API_KEY",
+      authDomain:        "PASTE_YOUR_AUTH_DOMAIN",
+      projectId:         "PASTE_YOUR_PROJECT_ID",
+      storageBucket:     "PASTE_YOUR_STORAGE_BUCKET",
+      messagingSenderId: "PASTE_YOUR_MESSAGING_SENDER_ID",
+      appId:             "PASTE_YOUR_APP_ID",
+    };
+    // ─────────────────────────────────────────────────────────────────────────
+
+    const app = initializeApp(firebaseConfig);
+    const db  = getFirestore(app);
+
+    // Expose db + helpers to the React app via window
+    window._db = db;
+    window._firestore = { doc, getDoc, setDoc, collection, getDocs };
+
+    // Signal React that Firebase is ready
+    window._firebaseReady = true;
+    window.dispatchEvent(new Event("firebaseReady"));
+  </script>
+
+  <!-- React + Babel (no build step needed) -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    // ── Firestore storage ─────────────────────────────────────────────────────
+
+    async function waitForFirebase() {
+      if (window._firebaseReady) return;
+      await new Promise(resolve => window.addEventListener("firebaseReady", resolve, { once: true }));
+    }
+
+    async function loadEvents() {
+      try {
+        await waitForFirebase();
+        const { collection, getDocs } = window._firestore;
+        const snap = await getDocs(collection(window._db, "events"));
+        return snap.docs.map(d => d.data());
+      } catch (e) {
+        console.error("loadEvents failed:", e);
+        return [];
+      }
+    }
+
+    async function saveEvent(ev) {
+      await waitForFirebase();
+      const { doc, setDoc } = window._firestore;
+      await setDoc(doc(window._db, "events", ev.id), ev);
+    }
+
+    async function saveEvents(events) {
+      // Used for bulk updates (RSVPs, poll responses) — just save the changed event
+      // Called with the full array; we upsert all of them
+      await waitForFirebase();
+      const { doc, setDoc } = window._firestore;
+      await Promise.all(events.map(ev => setDoc(doc(window._db, "events", ev.id), ev)));
+    }
+
+    // ── Utilities ─────────────────────────────────────────────────────────────
+
+    function genId() {
+      return Math.random().toString(36).slice(2, 10);
+    }
+
+    function formatDate(iso) {
+      if (!iso) return "";
+      const d = new Date(iso + "T00:00:00");
+      return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+    }
+
+    function today() {
+      return new Date().toISOString().split("T")[0];
+    }
+
+    function formatRange(range) {
+      if (!range || !range.start) return "";
+      if (!range.end || range.end === range.start) return formatDate(range.start);
+      const s = new Date(range.start + "T00:00:00");
+      const e = new Date(range.end + "T00:00:00");
+      const sameMonth = s.getMonth() === e.getMonth() && s.getFullYear() === e.getFullYear();
+      const startStr = s.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+      const endStr = sameMonth
+        ? e.toLocaleDateString("en-US", { weekday: "short", day: "numeric" })
+        : e.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+      return `${startStr} – ${endStr}`;
+    }
+
+    function daysInRange(range) {
+      if (!range || !range.start) return 0;
+      const s = new Date(range.start + "T00:00:00");
+      const e = new Date((range.end || range.start) + "T00:00:00");
+      return Math.round((e - s) / 86400000) + 1;
+    }
+
+    // ── Main App ──────────────────────────────────────────────────────────────
+
+    function App() {
+      const [view, setView] = useState("home");
+      const [events, setEvents] = useState([]);
+      const [activeEvent, setActiveEvent] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [respondingAs, setRespondingAs] = useState("");
+      const [shareCode, setShareCode] = useState(null);
+      const [error, setError] = useState(null);
+
+      useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        const code = params.get("event");
+        if (code) setShareCode(code);
+      }, []);
+
+      const refresh = useCallback(async () => {
+        try {
+          const evs = await loadEvents();
+          setEvents(evs);
+          if (shareCode) {
+            const found = evs.find(e => e.id === shareCode);
+            if (found) { setActiveEvent(found); setView("respond"); }
+          }
+        } catch (e) {
+          setError("Could not connect to database. Check your Firebase config.");
+        }
+        setLoading(false);
+      }, [shareCode]);
+
+      useEffect(() => { refresh(); }, [refresh]);
+
+      const syncEvent = useCallback(async (updated) => {
+        await saveEvent(updated);
+        setEvents(prev => prev.map(e => e.id === updated.id ? updated : e));
+        setActiveEvent(updated);
+      }, []);
+
+      if (loading) return <Loader />;
+      if (error) return <ErrorScreen message={error} />;
+
+      if (view === "create") return (
+        <CreateEvent
+          onSave={async (ev) => {
+            await saveEvent(ev);
+            setEvents(prev => [...prev, ev]);
+            setActiveEvent(ev);
+            setView("event");
+          }}
+          onBack={() => setView("home")}
+        />
+      );
+
+      if (view === "event" && activeEvent) return (
+        <EventDetail
+          event={activeEvent}
+          onBack={() => { setActiveEvent(null); setView("home"); }}
+          onUpdate={syncEvent}
+        />
+      );
+
+      if (view === "respond" && activeEvent) return (
+        <RespondView
+          event={activeEvent}
+          name={respondingAs}
+          onSetName={setRespondingAs}
+          onUpdate={syncEvent}
+        />
+      );
+
+      return (
+        <Home
+          events={events}
+          onCreate={() => setView("create")}
+          onOpen={(ev) => { setActiveEvent(ev); setView("event"); }}
+        />
+      );
+    }
+
+    // ── Error Screen ──────────────────────────────────────────────────────────
+
+    function ErrorScreen({ message }) {
+      return (
+        <div style={{...styles.page}}>
+          <div style={styles.center}>
+            <div style={{ fontSize: 48 }}>⚠️</div>
+            <div style={styles.emptyTitle}>Connection Error</div>
+            <div style={{ ...styles.emptyHint, color: "#f87171", maxWidth: 400, textAlign: "center" }}>{message}</div>
+            <div style={{ fontSize: 13, color: "#64748b", marginTop: 8, textAlign: "center", maxWidth: 400 }}>
+              Open this file, find the <code style={{ color: "#818cf8" }}>firebaseConfig</code> section near the top, and paste in your Firebase project credentials.
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Loader ────────────────────────────────────────────────────────────────
+
+    function Loader() {
+      return (
+        <div style={styles.page}>
+          <div style={styles.center}>
+            <div style={styles.spinner} />
+          </div>
+        </div>
+      );
+    }
+
+    // ── Home ──────────────────────────────────────────────────────────────────
+
+    function Home({ events, onCreate, onOpen }) {
+      return (
+        <div style={styles.page}>
+          <header style={styles.header}>
+            <div style={styles.logo}>📅 When &amp; Where</div>
+            <button type="button" style={styles.btnPrimary} onClick={onCreate}>+ New Event</button>
+          </header>
+          {events.length === 0 ? (
+            <div style={styles.empty}>
+              <div style={styles.emptyIcon}>🎉</div>
+              <p style={styles.emptyTitle}>No events yet</p>
+              <p style={styles.emptyHint}>Create your first event and invite your friends!</p>
+              <button type="button" style={styles.btnPrimary} onClick={onCreate}>Create Event</button>
+            </div>
+          ) : (
+            <div style={styles.list}>
+              {events.map(ev => (
+                <EventCard key={ev.id} event={ev} onClick={() => onOpen(ev)} />
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function EventCard({ event, onClick }) {
+      const rsvpCount = (event.rsvps || []).filter(r => r.status === "yes").length;
+      const pollCount = (event.pollResponses || []).length;
+      return (
+        <div style={styles.card} onClick={onClick} className="card-hover">
+          <div style={styles.cardLeft}>
+            <div style={styles.cardType}>{event.type === "poll" ? "📊 Poll" : "📌 Event"}</div>
+            <div style={styles.cardTitle}>{event.title}</div>
+            {event.type === "event" && event.date && (
+              <div style={styles.cardMeta}>📆 {formatDate(event.date)}{event.time && ` · ${event.time}`}</div>
+            )}
+            {event.location && <div style={styles.cardMeta}>📍 {event.location}</div>}
+          </div>
+          <div style={styles.cardRight}>
+            {event.type === "event"
+              ? <Pill label={`${rsvpCount} going`} color="#22c55e" />
+              : <Pill label={`${pollCount} responses`} color="#6366f1" />}
+            <div style={styles.arrow}>›</div>
+          </div>
+        </div>
+      );
+    }
+
+    function Pill({ label, color }) {
+      return <span style={{ ...styles.pill, background: color + "22", color }}>{label}</span>;
+    }
+
+    // ── Range Picker ──────────────────────────────────────────────────────────
+
+    function RangePicker({ ranges, onChange }) {
+      const [editing, setEditing] = useState(null);
+      const [draft, setDraft] = useState(null);
+
+      function startNewRange() { setDraft({ start: null, end: null }); setEditing("new"); }
+
+      function confirmDraft() {
+        if (!draft?.start || !draft?.end) return;
+        onChange([...ranges, { id: genId(), start: draft.start, end: draft.end }]);
+        setDraft(null); setEditing(null);
+      }
+
+      return (
+        <div>
+          {ranges.length > 0 && (
+            <div style={{ marginBottom: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+              {ranges.map((r, i) => (
+                <div key={r.id} style={styles.rangeChip}>
+                  <div>
+                    <div style={styles.rangeChipLabel}>Option {i + 1}</div>
+                    <div style={styles.rangeChipDates}>{formatRange(r)}</div>
+                    <div style={styles.rangeChipDays}>{daysInRange(r)} day{daysInRange(r) !== 1 ? "s" : ""}</div>
+                  </div>
+                  <button type="button" style={styles.rangeChipX} onClick={() => onChange(ranges.filter(x => x.id !== r.id))}>✕</button>
+                </div>
+              ))}
+            </div>
+          )}
+          {editing === "new" ? (
+            <div style={styles.rangeBuilder}>
+              <div style={styles.rangeBuilderTitle}>
+                Select days for this option
+                <span style={styles.rangeBuilderHint}> — tap a start day, then an end day</span>
+              </div>
+              <RangeCalendarPicker draft={draft} onRangeChange={(s, e) => setDraft({ start: s, end: e })} />
+              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                <button type="button"
+                  style={{ ...styles.btnPrimary, flex: 1, opacity: draft?.start && draft?.end ? 1 : 0.5 }}
+                  onClick={confirmDraft} disabled={!draft?.start || !draft?.end}>
+                  {draft?.start && draft?.end
+                    ? `Add "${formatRange({ start: draft.start, end: draft.end })}"`
+                    : draft?.start ? "Now pick an end day…" : "Pick a start day"}
+                </button>
+                <button type="button" style={styles.btnGhost} onClick={() => { setEditing(null); setDraft(null); }}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <button type="button" style={styles.btnGhost} onClick={startNewRange}>+ Add date option</button>
+          )}
+        </div>
+      );
+    }
+
+    // ── Range Calendar Picker ─────────────────────────────────────────────────
+
+    function RangeCalendarPicker({ draft, onRangeChange }) {
+      const now = new Date();
+      const [viewYear, setViewYear] = useState(now.getFullYear());
+      const [viewMonth, setViewMonth] = useState(now.getMonth());
+      const [hovered, setHovered] = useState(null);
+      const [showMonthPicker, setShowMonthPicker] = useState(false);
+      const todayStr = today();
+      const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+      const YEARS = Array.from({ length: 3 }, (_, i) => now.getFullYear() + i);
+      const anchor = draft?.start && !draft?.end ? draft.start : null;
+
+      function isoFor(y, m, d) {
+        return `${y}-${String(m+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+      }
+      function getDatesInRange(a, b) {
+        const s = a < b ? a : b, e = a < b ? b : a;
+        const dates = [], cur = new Date(s + "T00:00:00"), end = new Date(e + "T00:00:00");
+        while (cur <= end) { dates.push(cur.toISOString().split("T")[0]); cur.setDate(cur.getDate()+1); }
+        return dates;
+      }
+      const highlightDates = draft?.start && draft?.end
+        ? getDatesInRange(draft.start, draft.end)
+        : anchor && hovered && hovered >= todayStr ? getDatesInRange(anchor, hovered)
+        : draft?.start ? [draft.start] : [];
+
+      function handleClick(iso) {
+        if (iso < todayStr) return;
+        if (!anchor) { onRangeChange(iso, null); }
+        else { const s = anchor < iso ? anchor : iso, e = anchor < iso ? iso : anchor; onRangeChange(s, e); }
+      }
+      function prevMonth() { if (viewMonth===0){setViewMonth(11);setViewYear(y=>y-1);}else setViewMonth(m=>m-1); }
+      function nextMonth() { if (viewMonth===11){setViewMonth(0);setViewYear(y=>y+1);}else setViewMonth(m=>m+1); }
+
+      const firstDay = new Date(viewYear, viewMonth, 1).getDay();
+      const daysInMonth = new Date(viewYear, viewMonth+1, 0).getDate();
+      const cells = [];
+      for (let i = 0; i < firstDay; i++) cells.push(null);
+      for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+      return (
+        <div style={styles.cal}>
+          <div style={styles.calNav}>
+            <button type="button" style={styles.calNavBtn} onClick={prevMonth}>←</button>
+            <button type="button" style={styles.calMonthBtn} onClick={() => setShowMonthPicker(v => !v)}>
+              {MONTHS[viewMonth]} {viewYear} {showMonthPicker ? "▲" : "▼"}
+            </button>
+            <button type="button" style={styles.calNavBtn} onClick={nextMonth}>→</button>
+          </div>
+          {showMonthPicker && (
+            <div style={styles.calMonthPicker}>
+              <div style={styles.calPickerYears}>
+                {YEARS.map(y => (
+                  <button type="button" key={y}
+                    style={{...styles.calPickerYear, ...(y===viewYear ? styles.calPickerActive : {})}}
+                    onClick={() => { setViewYear(y); setShowMonthPicker(false); }}>{y}</button>
+                ))}
+              </div>
+              <div style={styles.calPickerMonths}>
+                {MONTHS.map((m, i) => {
+                  const isPast = viewYear===now.getFullYear() && i < now.getMonth();
+                  return (
+                    <button type="button" key={m}
+                      style={{...styles.calPickerMonth, ...(i===viewMonth ? styles.calPickerActive : {}), ...(isPast ? {color:"#334155",cursor:"default"} : {})}}
+                      onClick={() => { if (!isPast) { setViewMonth(i); setShowMonthPicker(false); } }}
+                      disabled={isPast}>{m.slice(0,3)}</button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {!showMonthPicker && (
+            <>
+              <div style={{...styles.rangeStatus, background: anchor ? "#f59e0b18" : "#6366f118", color: anchor ? "#fbbf24" : "#818cf8"}}>
+                {anchor ? <><strong>{formatDate(anchor)}</strong> → now click the end day</> : "Click a day to start your range"}
+              </div>
+              <div style={styles.calGrid}>
+                {["Su","Mo","Tu","We","Th","Fr","Sa"].map(l => <div key={l} style={styles.calDayLabel}>{l}</div>)}
+                {cells.map((d, ci) => {
+                  if (!d) return <div key={`e${ci}`} />;
+                  const iso = isoFor(viewYear, viewMonth, d);
+                  const past = iso < todayStr;
+                  const isToday = iso === todayStr;
+                  const inRange = highlightDates.includes(iso);
+                  const isEdge = iso === highlightDates[0] || iso === highlightDates[highlightDates.length-1];
+                  const hov = hovered===iso && !past && !inRange;
+                  return (
+                    <button type="button" key={iso}
+                      onClick={() => handleClick(iso)}
+                      onMouseEnter={() => !past && setHovered(iso)}
+                      onMouseLeave={() => setHovered(null)}
+                      style={{...styles.calDay, ...(past ? styles.calDayPast : styles.calDayAvail),
+                        ...(isToday && !inRange ? styles.calDayToday : {}),
+                        ...(hov ? styles.calDayHover : {}),
+                        ...(inRange && !isEdge ? styles.calDayInRange : {}),
+                        ...(isEdge ? styles.calDaySelected : {})}}
+                      disabled={past}>{d}</button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    // ── Calendar Picker (single date) ─────────────────────────────────────────
+
+    function CalendarPicker({ selected, onChange }) {
+      const now = new Date();
+      const [viewYear, setViewYear] = useState(now.getFullYear());
+      const [viewMonth, setViewMonth] = useState(now.getMonth());
+      const [hoveredDay, setHoveredDay] = useState(null);
+      const [showMonthPicker, setShowMonthPicker] = useState(false);
+      const todayStr = today();
+      const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+      const YEARS = Array.from({ length: 3 }, (_, i) => now.getFullYear() + i);
+
+      function isoFor(y, m, d) { return `${y}-${String(m+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`; }
+      function prevMonth() { if (viewMonth===0){setViewMonth(11);setViewYear(y=>y-1);}else setViewMonth(m=>m-1); }
+      function nextMonth() { if (viewMonth===11){setViewMonth(0);setViewYear(y=>y+1);}else setViewMonth(m=>m+1); }
+
+      const firstDay = new Date(viewYear, viewMonth, 1).getDay();
+      const daysInMonth = new Date(viewYear, viewMonth+1, 0).getDate();
+      const cells = [];
+      for (let i = 0; i < firstDay; i++) cells.push(null);
+      for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+      return (
+        <div style={styles.cal}>
+          <div style={styles.calNav}>
+            <button type="button" style={styles.calNavBtn} onClick={prevMonth}>←</button>
+            <button type="button" style={styles.calMonthBtn} onClick={() => setShowMonthPicker(v => !v)}>
+              {MONTHS[viewMonth]} {viewYear} {showMonthPicker ? "▲" : "▼"}
+            </button>
+            <button type="button" style={styles.calNavBtn} onClick={nextMonth}>→</button>
+          </div>
+          {showMonthPicker && (
+            <div style={styles.calMonthPicker}>
+              <div style={styles.calPickerYears}>
+                {YEARS.map(y => (
+                  <button type="button" key={y}
+                    style={{...styles.calPickerYear, ...(y===viewYear ? styles.calPickerActive : {})}}
+                    onClick={() => { setViewYear(y); setShowMonthPicker(false); }}>{y}</button>
+                ))}
+              </div>
+              <div style={styles.calPickerMonths}>
+                {MONTHS.map((m, i) => {
+                  const isPast = viewYear===now.getFullYear() && i < now.getMonth();
+                  return (
+                    <button type="button" key={m}
+                      style={{...styles.calPickerMonth, ...(i===viewMonth ? styles.calPickerActive : {}), ...(isPast ? {color:"#334155",cursor:"default"} : {})}}
+                      onClick={() => { if (!isPast) { setViewMonth(i); setShowMonthPicker(false); } }}
+                      disabled={isPast}>{m.slice(0,3)}</button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {!showMonthPicker && (
+            <div style={styles.calGrid}>
+              {["Su","Mo","Tu","We","Th","Fr","Sa"].map(l => <div key={l} style={styles.calDayLabel}>{l}</div>)}
+              {cells.map((d, i) => {
+                if (!d) return <div key={`e${i}`} />;
+                const iso = isoFor(viewYear, viewMonth, d);
+                const sel = selected === iso;
+                const past = iso < todayStr;
+                const isToday = iso === todayStr;
+                const hov = hoveredDay===iso && !past;
+                return (
+                  <button type="button" key={iso}
+                    onClick={() => !past && onChange(iso)}
+                    onMouseEnter={() => !past && setHoveredDay(iso)}
+                    onMouseLeave={() => setHoveredDay(null)}
+                    style={{...styles.calDay, ...(past ? styles.calDayPast : styles.calDayAvail),
+                      ...(isToday && !sel ? styles.calDayToday : {}),
+                      ...(hov && !sel ? styles.calDayHover : {}),
+                      ...(sel ? styles.calDaySelected : {})}}
+                    disabled={past}>{d}</button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ── Create Event ──────────────────────────────────────────────────────────
+
+    function CreateEvent({ onSave, onBack }) {
+      const [type, setType] = useState("event");
+      const [title, setTitle] = useState("");
+      const [date, setDate] = useState("");
+      const [time, setTime] = useState("");
+      const [location, setLocation] = useState("");
+      const [description, setDescription] = useState("");
+      const [pollRanges, setPollRanges] = useState([]);
+      const [error, setError] = useState("");
+      const [saving, setSaving] = useState(false);
+
+      async function handleSave() {
+        if (!title.trim()) { setError("Please add a title."); return; }
+        if (type === "event" && !date) { setError("Please pick a date."); return; }
+        if (type === "poll" && pollRanges.length < 1) { setError("Add at least one date option."); return; }
+        setError(""); setSaving(true);
+        const ev = {
+          id: genId(), type, title: title.trim(), date, time, location, description,
+          pollRanges: type === "poll" ? pollRanges : [],
+          pollDates: [], rsvps: [], pollResponses: [],
+          createdAt: new Date().toISOString(),
+        };
+        try {
+          await onSave(ev);
+        } catch (e) {
+          setError("Failed to save: " + e.message);
+          setSaving(false);
+        }
+      }
+
+      return (
+        <div style={styles.page}>
+          <header style={styles.header}>
+            <button type="button" style={styles.btnGhost} onClick={onBack}>← Back</button>
+            <div style={styles.logo}>New Event</div>
+            <button type="button" style={{...styles.btnPrimary, opacity: saving ? 0.6 : 1}} onClick={handleSave} disabled={saving}>
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </header>
+          <div style={styles.form}>
+            <div style={styles.segmented}>
+              {["event","poll"].map(t => (
+                <button type="button" key={t}
+                  style={{...styles.seg, ...(type===t ? styles.segActive : {})}}
+                  onClick={() => setType(t)}>
+                  {t === "event" ? "📌 Fixed Event" : "📊 Availability Poll"}
+                </button>
+              ))}
+            </div>
+            <Field label="Title" required>
+              <input style={styles.input} value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Game Night, Brunch, Road Trip" />
+            </Field>
+            {type === "event" ? (
+              <>
+                <Field label="Date" required><CalendarPicker selected={date} onChange={setDate} /></Field>
+                <Field label="Time"><input style={styles.input} type="time" value={time} onChange={e => setTime(e.target.value)} /></Field>
+              </>
+            ) : (
+              <Field label="Date Options — each option can span multiple days" required>
+                <RangePicker ranges={pollRanges} onChange={setPollRanges} />
+              </Field>
+            )}
+            <Field label="Location">
+              <input style={styles.input} value={location} onChange={e => setLocation(e.target.value)} placeholder="Where?" />
+            </Field>
+            <Field label="Description">
+              <textarea style={{...styles.input, height: 80, resize: "vertical"}} value={description} onChange={e => setDescription(e.target.value)} placeholder="Any details..." />
+            </Field>
+            {error && <div style={styles.error}>{error}</div>}
+          </div>
+        </div>
+      );
+    }
+
+    function Field({ label, children, required, style }) {
+      return (
+        <div style={{ marginBottom: 16, ...style }}>
+          <label style={styles.label}>{label}{required && <span style={{ color: "#f87171" }}> *</span>}</label>
+          {children}
+        </div>
+      );
+    }
+
+    // ── Event Detail ──────────────────────────────────────────────────────────
+
+    function EventDetail({ event, onBack, onUpdate }) {
+      const [copied, setCopied] = useState(false);
+      const shareUrl = `${window.location.href.split("?")[0]}?event=${event.id}`;
+
+      function copyLink() {
+        navigator.clipboard.writeText(shareUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
+      }
+
+      const yesRsvps = (event.rsvps || []).filter(r => r.status === "yes");
+      const maybeRsvps = (event.rsvps || []).filter(r => r.status === "maybe");
+      const noRsvps = (event.rsvps || []).filter(r => r.status === "no");
+
+      const ranges = event.pollRanges || [];
+      const pollTally = {};
+      ranges.forEach(r => { pollTally[r.id] = []; });
+      (event.pollResponses || []).forEach(resp => {
+        (resp.available || []).forEach(rid => { if (pollTally[rid]) pollTally[rid].push(resp.name); });
+      });
+      const maxVotes = Math.max(...Object.values(pollTally).map(n => n.length), 1);
+      const bestRangeId = Object.entries(pollTally).sort((a,b) => b[1].length - a[1].length)[0]?.[0];
+      const bestRange = ranges.find(r => r.id === bestRangeId);
+
+      return (
+        <div style={styles.page}>
+          <header style={styles.header}>
+            <button type="button" style={styles.btnGhost} onClick={onBack}>← Back</button>
+            <div style={styles.logo}>{event.title}</div>
+            <div />
+          </header>
+          <div style={styles.form}>
+            <div style={styles.metaBox}>
+              {event.type === "event" && event.date && (
+                <div style={styles.metaRow}>📆 <strong>{formatDate(event.date)}</strong>{event.time && ` at ${event.time}`}</div>
+              )}
+              {event.location && <div style={styles.metaRow}>📍 {event.location}</div>}
+              {event.description && <div style={styles.metaRow}>💬 {event.description}</div>}
+            </div>
+            <div style={styles.shareBox}>
+              <div style={styles.shareLabel}>🔗 Friend invite link</div>
+              <div style={styles.shareRow}>
+                <input style={{...styles.input, flex:1, margin:0, fontSize:12, color:"#94a3b8"}} readOnly value={shareUrl} />
+                <button type="button" style={styles.btnPrimary} onClick={copyLink}>{copied ? "✓ Copied!" : "Copy"}</button>
+              </div>
+              <div style={styles.shareHint}>Share this link — friends can RSVP or vote without signing up.</div>
+            </div>
+            {event.type === "event" && (
+              <div>
+                <div style={styles.sectionTitle}>RSVPs</div>
+                {(event.rsvps || []).length === 0
+                  ? <div style={styles.emptyHintSmall}>No responses yet. Share the link above!</div>
+                  : <>
+                      <RsvpGroup label="✅ Going" people={yesRsvps} color="#22c55e" />
+                      <RsvpGroup label="🤔 Maybe" people={maybeRsvps} color="#f59e0b" />
+                      <RsvpGroup label="❌ Can't make it" people={noRsvps} color="#f87171" />
+                    </>
+                }
+              </div>
+            )}
+            {event.type === "poll" && (
+              <div>
+                <div style={styles.sectionTitle}>Poll Results</div>
+                {(event.pollResponses || []).length === 0
+                  ? <div style={styles.emptyHintSmall}>No responses yet. Share the link above!</div>
+                  : <>
+                      {bestRange && (
+                        <div style={styles.bestDate}>
+                          🏆 Most popular: <strong>{formatRange(bestRange)}</strong> — {pollTally[bestRangeId].length} available
+                        </div>
+                      )}
+                      {ranges.map((r, i) => {
+                        const names = pollTally[r.id] || [];
+                        return (
+                          <div key={r.id} style={styles.pollRow}>
+                            <div style={{...styles.pollDate, width:140}}>
+                              <div style={{fontWeight:700, color:"#e2e8f0", fontSize:12}}>Option {i+1}</div>
+                              <div style={{fontSize:12, color:"#64748b"}}>{formatRange(r)}</div>
+                              <div style={{fontSize:11, color:"#475569"}}>{daysInRange(r)} days</div>
+                            </div>
+                            <div style={styles.pollBar}>
+                              <div style={{...styles.pollFill, width:`${(names.length/maxVotes)*100}%`}} />
+                            </div>
+                            <div style={styles.pollNames}>{names.length > 0 ? names.join(", ") : "—"}</div>
+                          </div>
+                        );
+                      })}
+                    </>
+                }
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    function RsvpGroup({ label, people, color }) {
+      if (people.length === 0) return null;
+      return (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ color, fontWeight: 600, fontSize: 13, marginBottom: 4 }}>{label} ({people.length})</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {people.map((r, i) => (
+              <span key={i} style={{ background: color+"18", color, borderRadius: 20, padding: "3px 10px", fontSize: 13 }}>{r.name}</span>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ── Respond View ──────────────────────────────────────────────────────────
+
+    function RespondView({ event, name, onSetName, onUpdate }) {
+      const [localName, setLocalName] = useState(name || "");
+      const [step, setStep] = useState(name ? "respond" : "name");
+      const [rsvpStatus, setRsvpStatus] = useState(null);
+      const [selected, setSelected] = useState([]);
+      const [submitted, setSubmitted] = useState(false);
+      const [error, setError] = useState("");
+      const [saving, setSaving] = useState(false);
+
+      function confirmName() {
+        if (!localName.trim()) { setError("Please enter your name."); return; }
+        setError(""); onSetName(localName.trim()); setStep("respond");
+      }
+
+      async function submitRsvp() {
+        if (!rsvpStatus) { setError("Please choose a status."); return; }
+        setError(""); setSaving(true);
+        const rsvps = (event.rsvps || []).filter(r => r.name !== localName);
+        rsvps.push({ name: localName, status: rsvpStatus, at: new Date().toISOString() });
+        await onUpdate({ ...event, rsvps });
+        setSubmitted(true);
+      }
+
+      async function submitPoll() {
+        if (selected.length === 0) { setError("Select at least one option."); return; }
+        setError(""); setSaving(true);
+        const pollResponses = (event.pollResponses || []).filter(r => r.name !== localName);
+        pollResponses.push({ name: localName, available: selected, at: new Date().toISOString() });
+        await onUpdate({ ...event, pollResponses });
+        setSubmitted(true);
+      }
+
+      if (submitted) return (
+        <div style={styles.page}>
+          <div style={styles.center}>
+            <div style={{ fontSize: 64, marginBottom: 16 }}>🎉</div>
+            <div style={styles.emptyTitle}>Response recorded!</div>
+            <div style={styles.emptyHint}>Thanks {localName}. The organizer can see your response.</div>
+          </div>
+        </div>
+      );
+
+      return (
+        <div style={styles.page}>
+          <header style={styles.header}>
+            <div style={styles.logo}>📅 When &amp; Where</div>
+            <div />
+          </header>
+          <div style={styles.form}>
+            <div style={styles.inviteBox}>
+              <div style={styles.inviteTitle}>{event.title}</div>
+              {event.type === "event" && event.date && (
+                <div style={styles.metaRow}>📆 {formatDate(event.date)}{event.time && ` at ${event.time}`}</div>
+              )}
+              {event.location && <div style={styles.metaRow}>📍 {event.location}</div>}
+              {event.description && <div style={styles.metaRow}>💬 {event.description}</div>}
+            </div>
+            {step === "name" ? (
+              <>
+                <Field label="Your name" required>
+                  <input style={styles.input} value={localName} onChange={e => setLocalName(e.target.value)}
+                    onKeyDown={e => e.key === "Enter" && confirmName()} placeholder="How should we call you?" autoFocus />
+                </Field>
+                {error && <div style={styles.error}>{error}</div>}
+                <button type="button" style={styles.btnPrimary} onClick={confirmName}>Continue →</button>
+              </>
+            ) : event.type === "event" ? (
+              <>
+                <div style={styles.sectionTitle}>Are you coming?</div>
+                <div style={styles.rsvpButtons}>
+                  {[
+                    { status: "yes", label: "✅ Yes!", color: "#22c55e" },
+                    { status: "maybe", label: "🤔 Maybe", color: "#f59e0b" },
+                    { status: "no", label: "❌ Can't make it", color: "#f87171" },
+                  ].map(opt => (
+                    <button type="button" key={opt.status}
+                      style={{...styles.rsvpBtn,
+                        borderColor: rsvpStatus===opt.status ? opt.color : "#334155",
+                        background: rsvpStatus===opt.status ? opt.color+"22" : "transparent",
+                        color: rsvpStatus===opt.status ? opt.color : "#94a3b8"}}
+                      onClick={() => setRsvpStatus(opt.status)}>{opt.label}</button>
+                  ))}
+                </div>
+                {error && <div style={styles.error}>{error}</div>}
+                <button type="button" style={{...styles.btnPrimary, opacity: saving ? 0.6:1}} onClick={submitRsvp} disabled={saving}>
+                  {saving ? "Saving…" : "Submit RSVP"}
+                </button>
+              </>
+            ) : (
+              <>
+                <div style={styles.sectionTitle}>Which dates work for you?</div>
+                <div style={{ fontSize: 13, color: "#64748b", marginBottom: 14 }}>Select all options that work.</div>
+                <div style={{ marginBottom: 16 }}>
+                  {(event.pollRanges || []).map((r, i) => {
+                    const sel = selected.includes(r.id);
+                    return (
+                      <button type="button" key={r.id}
+                        style={{...styles.dateOption,
+                          borderColor: sel ? "#6366f1" : "#334155",
+                          background: sel ? "#6366f122" : "#1e293b",
+                          color: sel ? "#818cf8" : "#e2e8f0"}}
+                        onClick={() => setSelected(sel ? selected.filter(x=>x!==r.id) : [...selected,r.id])}>
+                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                          <div>
+                            <div style={{fontWeight:700, fontSize:13, color: sel?"#818cf8":"#94a3b8", marginBottom:2}}>Option {i+1}</div>
+                            <div style={{fontWeight:600, fontSize:15}}>{formatRange(r)}</div>
+                            <div style={{fontSize:12, color: sel?"#6366f1":"#475569", marginTop:2}}>{daysInRange(r)} day{daysInRange(r)!==1?"s":""}</div>
+                          </div>
+                          <div style={{fontSize:20, marginLeft:12}}>{sel ? "✓" : ""}</div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+                {error && <div style={styles.error}>{error}</div>}
+                <button type="button" style={{...styles.btnPrimary, opacity: saving?0.6:1}} onClick={submitPoll} disabled={saving}>
+                  {saving ? "Saving…" : "Submit Availability"}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ── Styles ────────────────────────────────────────────────────────────────
+
+    const styles = {
+      page: { height:"100vh", display:"flex", flexDirection:"column", background:"#0f172a", color:"#e2e8f0", fontFamily:"'DM Sans', sans-serif", overflow:"hidden" },
+      header: { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"16px 20px", borderBottom:"1px solid #1e293b", background:"#0f172a", flexShrink:0, zIndex:10 },
+      logo: { fontFamily:"'DM Sans', sans-serif", fontSize:20, fontWeight:700, color:"#e2e8f0", letterSpacing:"-0.5px" },
+      form: { flex:1, overflowY:"auto", maxWidth:560, width:"100%", margin:"0 auto", padding:"24px 20px 40px" },
+      list: { flex:1, overflowY:"auto", maxWidth:560, width:"100%", margin:"0 auto", padding:"16px 20px 40px", display:"flex", flexDirection:"column", gap:12 },
+      card: { background:"#1e293b", borderRadius:14, padding:"16px 20px", display:"flex", alignItems:"center", justifyContent:"space-between", cursor:"pointer", border:"1px solid #334155", transition:"border-color 0.15s" },
+      cardLeft: { flex:1 },
+      cardRight: { display:"flex", alignItems:"center", gap:10 },
+      cardType: { fontSize:11, color:"#64748b", fontWeight:600, marginBottom:4, textTransform:"uppercase", letterSpacing:"0.5px" },
+      cardTitle: { fontSize:17, fontWeight:600, color:"#f1f5f9", marginBottom:4 },
+      cardMeta: { fontSize:13, color:"#64748b" },
+      arrow: { fontSize:22, color:"#475569" },
+      pill: { borderRadius:20, padding:"3px 10px", fontSize:12, fontWeight:600 },
+      empty: { flex:1, overflowY:"auto", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:"80px 20px", gap:12 },
+      emptyIcon: { fontSize:56 },
+      emptyTitle: { fontSize:22, fontWeight:700, color:"#f1f5f9" },
+      emptyHint: { fontSize:14, color:"#64748b", textAlign:"center", maxWidth:280 },
+      emptyHintSmall: { fontSize:13, color:"#64748b", padding:"8px 0" },
+      center: { flex:1, overflowY:"auto", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:12, padding:32 },
+      spinner: { width:36, height:36, border:"3px solid #334155", borderTop:"3px solid #6366f1", borderRadius:"50%", animation:"spin 0.8s linear infinite" },
+      segmented: { display:"flex", background:"#1e293b", borderRadius:10, padding:4, marginBottom:24, gap:4 },
+      seg: { flex:1, padding:"8px 0", borderRadius:8, border:"none", background:"transparent", color:"#64748b", fontFamily:"'DM Sans', sans-serif", fontSize:14, fontWeight:500, cursor:"pointer", transition:"all 0.15s" },
+      segActive: { background:"#6366f1", color:"#fff", fontWeight:700 },
+      label: { display:"block", fontSize:13, fontWeight:600, color:"#94a3b8", marginBottom:6, textTransform:"uppercase", letterSpacing:"0.4px" },
+      input: { display:"block", width:"100%", padding:"10px 14px", borderRadius:10, border:"1.5px solid #334155", background:"#1e293b", color:"#e2e8f0", fontFamily:"'DM Sans', sans-serif", fontSize:15, outline:"none", boxSizing:"border-box", marginBottom:4, transition:"border-color 0.15s" },
+      btnPrimary: { padding:"10px 20px", borderRadius:10, border:"none", background:"#6366f1", color:"#fff", fontFamily:"'DM Sans', sans-serif", fontSize:14, fontWeight:700, cursor:"pointer", whiteSpace:"nowrap" },
+      btnGhost: { padding:"10px 20px", borderRadius:10, border:"1.5px solid #334155", background:"transparent", color:"#94a3b8", fontFamily:"'DM Sans', sans-serif", fontSize:14, cursor:"pointer" },
+      error: { color:"#f87171", fontSize:13, marginBottom:12, padding:"8px 12px", background:"#f8717118", borderRadius:8 },
+      shareBox: { background:"#1e293b", borderRadius:14, padding:16, marginBottom:24, border:"1px solid #334155" },
+      shareLabel: { fontSize:14, fontWeight:700, color:"#e2e8f0", marginBottom:10 },
+      shareRow: { display:"flex", gap:8, alignItems:"center", marginBottom:8 },
+      shareHint: { fontSize:12, color:"#64748b" },
+      metaBox: { background:"#1e293b", borderRadius:14, padding:16, marginBottom:24, display:"flex", flexDirection:"column", gap:6, border:"1px solid #334155" },
+      metaRow: { fontSize:14, color:"#94a3b8" },
+      sectionTitle: { fontSize:15, fontWeight:700, color:"#e2e8f0", marginBottom:12 },
+      bestDate: { background:"#22c55e18", color:"#4ade80", borderRadius:10, padding:"10px 14px", fontSize:14, marginBottom:16 },
+      pollRow: { display:"flex", alignItems:"center", gap:10, marginBottom:10 },
+      pollDate: { fontSize:13, color:"#94a3b8", width:100, flexShrink:0 },
+      pollBar: { flex:1, height:8, background:"#1e293b", borderRadius:4, overflow:"hidden" },
+      pollFill: { height:"100%", background:"#6366f1", borderRadius:4, transition:"width 0.4s ease" },
+      pollNames: { fontSize:12, color:"#64748b", width:120, textAlign:"right" },
+      inviteBox: { background:"linear-gradient(135deg, #6366f122, #818cf810)", borderRadius:14, padding:20, marginBottom:24, border:"1px solid #6366f133" },
+      inviteTitle: { fontSize:22, fontWeight:800, color:"#f1f5f9", marginBottom:8 },
+      rsvpButtons: { display:"flex", flexDirection:"column", gap:10, marginBottom:20 },
+      rsvpBtn: { padding:"14px 20px", borderRadius:12, border:"1.5px solid", background:"transparent", fontFamily:"'DM Sans', sans-serif", fontSize:16, fontWeight:600, cursor:"pointer", textAlign:"left", transition:"all 0.15s" },
+      rangeChip: { display:"flex", justifyContent:"space-between", alignItems:"center", background:"#1e293b", border:"1.5px solid #6366f133", borderRadius:12, padding:"12px 14px" },
+      rangeChipLabel: { fontSize:11, fontWeight:700, color:"#6366f1", textTransform:"uppercase", letterSpacing:"0.5px", marginBottom:2 },
+      rangeChipDates: { fontSize:15, fontWeight:700, color:"#e2e8f0" },
+      rangeChipDays: { fontSize:12, color:"#64748b", marginTop:2 },
+      rangeChipX: { background:"none", border:"1.5px solid #334155", color:"#64748b", cursor:"pointer", borderRadius:8, width:28, height:28, fontSize:13, fontFamily:"'DM Sans', sans-serif", flexShrink:0 },
+      rangeBuilder: { background:"#0f172a", borderRadius:12, padding:14, border:"1.5px solid #334155" },
+      rangeBuilderTitle: { fontSize:14, fontWeight:700, color:"#e2e8f0", marginBottom:10 },
+      rangeBuilderHint: { fontWeight:400, color:"#64748b" },
+      rangeStatus: { borderRadius:8, padding:"8px 12px", fontSize:13, fontWeight:500, marginBottom:10 },
+      cal: { background:"#1e293b", borderRadius:14, padding:"16px", border:"1.5px solid #334155", marginBottom:4 },
+      calNav: { display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14, gap:8 },
+      calNavBtn: { background:"#0f172a", border:"1.5px solid #334155", color:"#e2e8f0", fontSize:18, fontWeight:700, cursor:"pointer", borderRadius:8, width:38, height:38, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontFamily:"'DM Sans', sans-serif" },
+      calMonthBtn: { flex:1, background:"#0f172a", border:"1.5px solid #334155", color:"#e2e8f0", fontSize:15, fontWeight:700, cursor:"pointer", borderRadius:8, height:38, fontFamily:"'DM Sans', sans-serif", letterSpacing:"-0.2px" },
+      calMonthPicker: { marginBottom:14 },
+      calPickerYears: { display:"flex", gap:8, marginBottom:10 },
+      calPickerYear: { flex:1, padding:"8px 0", borderRadius:8, border:"1.5px solid #334155", background:"transparent", color:"#94a3b8", fontFamily:"'DM Sans', sans-serif", fontSize:14, fontWeight:600, cursor:"pointer" },
+      calPickerMonths: { display:"grid", gridTemplateColumns:"repeat(4, 1fr)", gap:6 },
+      calPickerMonth: { padding:"8px 0", borderRadius:8, border:"1.5px solid #334155", background:"transparent", color:"#cbd5e1", fontFamily:"'DM Sans', sans-serif", fontSize:13, fontWeight:600, cursor:"pointer" },
+      calPickerActive: { background:"#6366f1", borderColor:"#6366f1", color:"#fff" },
+      calGrid: { display:"grid", gridTemplateColumns:"repeat(7, 1fr)", gap:3 },
+      calDayLabel: { textAlign:"center", fontSize:11, fontWeight:700, color:"#64748b", padding:"4px 0 8px", textTransform:"uppercase", letterSpacing:"0.5px" },
+      calDay: { aspectRatio:"1", borderRadius:8, border:"1.5px solid transparent", fontSize:14, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans', sans-serif", transition:"all 0.1s", display:"flex", alignItems:"center", justifyContent:"center" },
+      calDayAvail: { background:"#0f172a", color:"#e2e8f0" },
+      calDaySelected: { background:"#6366f1", borderColor:"#6366f1", color:"#fff", fontWeight:800 },
+      calDayPast: { background:"transparent", color:"#334155", cursor:"default", border:"1.5px solid transparent" },
+      calDayToday: { borderColor:"#6366f1", color:"#818cf8", background:"#0f172a" },
+      calDayHover: { background:"#334155", borderColor:"#475569", color:"#f1f5f9" },
+      calDayInRange: { background:"#6366f133", color:"#c7d2fe", borderRadius:0 },
+      calChips: { display:"flex", flexWrap:"wrap", gap:6, marginTop:14, paddingTop:14, borderTop:"1px solid #334155" },
+      calChip: { display:"flex", alignItems:"center", gap:6, background:"#6366f122", color:"#818cf8", borderRadius:20, padding:"4px 10px", fontSize:12, fontWeight:600 },
+      calChipX: { background:"none", border:"none", color:"#6366f1", cursor:"pointer", padding:0, fontSize:11, fontFamily:"'DM Sans', sans-serif" },
+      dateOption: { display:"block", width:"100%", padding:"13px 16px", borderRadius:12, border:"1.5px solid", background:"transparent", fontFamily:"'DM Sans', sans-serif", fontSize:15, fontWeight:500, cursor:"pointer", textAlign:"left", marginBottom:10, transition:"all 0.15s" },
+    };
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
